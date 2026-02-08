@@ -1,19 +1,31 @@
 import torch, os, argparse, accelerate, warnings
 from diffsynth.core import UnifiedDataset
-from diffsynth.core.data.operators import LoadVideo, LoadAudio, ImageCropAndResize, ToAbsolutePath
+from diffsynth.core.data.operators import (
+    LoadVideo,
+    LoadAudio,
+    ImageCropAndResize,
+    ToAbsolutePath,
+)
 from diffsynth.pipelines.wan_video import WanVideoPipeline, ModelConfig
 from diffsynth.diffusion import *
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 class WanTrainingModule(DiffusionTrainingModule):
     def __init__(
         self,
-        model_paths=None, model_id_with_origin_paths=None,
-        tokenizer_path=None, audio_processor_path=None,
+        model_paths=None,
+        model_id_with_origin_paths=None,
+        tokenizer_path=None,
+        audio_processor_path=None,
         trainable_models=None,
-        lora_base_model=None, lora_target_modules="", lora_rank=32, lora_checkpoint=None,
-        preset_lora_path=None, preset_lora_model=None,
+        lora_base_model=None,
+        lora_target_modules="",
+        lora_rank=32,
+        lora_checkpoint=None,
+        preset_lora_path=None,
+        preset_lora_model=None,
         use_gradient_checkpointing=True,
         use_gradient_checkpointing_offload=False,
         extra_inputs=None,
@@ -27,24 +39,52 @@ class WanTrainingModule(DiffusionTrainingModule):
         super().__init__()
         # Warning
         if not use_gradient_checkpointing:
-            warnings.warn("Gradient checkpointing is detected as disabled. To prevent out-of-memory errors, the training framework will forcibly enable gradient checkpointing.")
+            warnings.warn(
+                "Gradient checkpointing is detected as disabled. To prevent out-of-memory errors, the training framework will forcibly enable gradient checkpointing."
+            )
             use_gradient_checkpointing = True
-        
+
         # Load models
-        model_configs = self.parse_model_configs(model_paths, model_id_with_origin_paths, fp8_models=fp8_models, offload_models=offload_models, device=device)
-        tokenizer_config = ModelConfig(model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="google/umt5-xxl/") if tokenizer_path is None else ModelConfig(tokenizer_path)
+        model_configs = self.parse_model_configs(
+            model_paths,
+            model_id_with_origin_paths,
+            fp8_models=fp8_models,
+            offload_models=offload_models,
+            device=device,
+        )
+        tokenizer_config = (
+            ModelConfig(
+                model_id="Wan-AI/Wan2.1-T2V-1.3B",
+                origin_file_pattern="google/umt5-xxl/",
+            )
+            if tokenizer_path is None
+            else ModelConfig(tokenizer_path)
+        )
         audio_processor_config = self.parse_path_or_model_id(audio_processor_path)
-        self.pipe = WanVideoPipeline.from_pretrained(torch_dtype=torch.bfloat16, device=device, model_configs=model_configs, tokenizer_config=tokenizer_config, audio_processor_config=audio_processor_config)
-        self.pipe = self.split_pipeline_units(task, self.pipe, trainable_models, lora_base_model)
-        
+        self.pipe = WanVideoPipeline.from_pretrained(
+            torch_dtype=torch.bfloat16,
+            device=device,
+            model_configs=model_configs,
+            tokenizer_config=tokenizer_config,
+            audio_processor_config=audio_processor_config,
+        )
+        self.pipe = self.split_pipeline_units(
+            task, self.pipe, trainable_models, lora_base_model
+        )
+
         # Training mode
         self.switch_pipe_to_training_mode(
-            self.pipe, trainable_models,
-            lora_base_model, lora_target_modules, lora_rank, lora_checkpoint,
-            preset_lora_path, preset_lora_model,
+            self.pipe,
+            trainable_models,
+            lora_base_model,
+            lora_target_modules,
+            lora_rank,
+            lora_checkpoint,
+            preset_lora_path,
+            preset_lora_model,
             task=task,
         )
-        
+
         # Store other configs
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.use_gradient_checkpointing_offload = use_gradient_checkpointing_offload
@@ -54,26 +94,37 @@ class WanTrainingModule(DiffusionTrainingModule):
         self.task_to_loss = {
             "sft:data_process": lambda pipe, *args: args,
             "direct_distill:data_process": lambda pipe, *args: args,
-            "sft": lambda pipe, inputs_shared, inputs_posi, inputs_nega: FlowMatchSFTLoss(pipe, **inputs_shared, **inputs_posi),
-            "sft:train": lambda pipe, inputs_shared, inputs_posi, inputs_nega: FlowMatchSFTLoss(pipe, **inputs_shared, **inputs_posi),
-            "direct_distill": lambda pipe, inputs_shared, inputs_posi, inputs_nega: DirectDistillLoss(pipe, **inputs_shared, **inputs_posi),
-            "direct_distill:train": lambda pipe, inputs_shared, inputs_posi, inputs_nega: DirectDistillLoss(pipe, **inputs_shared, **inputs_posi),
+            "sft": lambda pipe, inputs_shared, inputs_posi, inputs_nega: FlowMatchSFTLoss(
+                pipe, **inputs_shared, **inputs_posi
+            ),
+            "sft:train": lambda pipe, inputs_shared, inputs_posi, inputs_nega: FlowMatchSFTLoss(
+                pipe, **inputs_shared, **inputs_posi
+            ),
+            "direct_distill": lambda pipe, inputs_shared, inputs_posi, inputs_nega: DirectDistillLoss(
+                pipe, **inputs_shared, **inputs_posi
+            ),
+            "direct_distill:train": lambda pipe, inputs_shared, inputs_posi, inputs_nega: DirectDistillLoss(
+                pipe, **inputs_shared, **inputs_posi
+            ),
         }
         self.max_timestep_boundary = max_timestep_boundary
         self.min_timestep_boundary = min_timestep_boundary
-        
+
     def parse_extra_inputs(self, data, extra_inputs, inputs_shared):
         for extra_input in extra_inputs:
             if extra_input == "input_image":
                 inputs_shared["input_image"] = data["video"][0]
             elif extra_input == "end_image":
                 inputs_shared["end_image"] = data["video"][-1]
-            elif extra_input == "reference_image" or extra_input == "vace_reference_image":
+            elif (
+                extra_input == "reference_image"
+                or extra_input == "vace_reference_image"
+            ):
                 inputs_shared[extra_input] = data[extra_input][0]
             else:
                 inputs_shared[extra_input] = data[extra_input]
         return inputs_shared
-    
+
     def get_pipeline_inputs(self, data):
         inputs_posi = {"prompt": data["prompt"]}
         inputs_nega = {}
@@ -98,10 +149,13 @@ class WanTrainingModule(DiffusionTrainingModule):
         }
         inputs_shared = self.parse_extra_inputs(data, self.extra_inputs, inputs_shared)
         return inputs_shared, inputs_posi, inputs_nega
-    
+
     def forward(self, data, inputs=None):
-        if inputs is None: inputs = self.get_pipeline_inputs(data)
-        inputs = self.transfer_data_to_device(inputs, self.pipe.device, self.pipe.torch_dtype)
+        if inputs is None:
+            inputs = self.get_pipeline_inputs(data)
+        inputs = self.transfer_data_to_device(
+            inputs, self.pipe.device, self.pipe.torch_dtype
+        )
         for unit in self.pipe.units:
             inputs = self.pipe.unit_runner(unit, self.pipe, *inputs)
         loss = self.task_to_loss[self.task](self.pipe, *inputs)
@@ -112,11 +166,33 @@ def wan_parser():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
     parser = add_general_config(parser)
     parser = add_video_size_config(parser)
-    parser.add_argument("--tokenizer_path", type=str, default=None, help="Path to tokenizer.")
-    parser.add_argument("--audio_processor_path", type=str, default=None, help="Path to the audio processor. If provided, the processor will be used for Wan2.2-S2V model.")
-    parser.add_argument("--max_timestep_boundary", type=float, default=1.0, help="Max timestep boundary (for mixed models, e.g., Wan-AI/Wan2.2-I2V-A14B).")
-    parser.add_argument("--min_timestep_boundary", type=float, default=0.0, help="Min timestep boundary (for mixed models, e.g., Wan-AI/Wan2.2-I2V-A14B).")
-    parser.add_argument("--initialize_model_on_cpu", default=False, action="store_true", help="Whether to initialize models on CPU.")
+    parser.add_argument(
+        "--tokenizer_path", type=str, default=None, help="Path to tokenizer."
+    )
+    parser.add_argument(
+        "--audio_processor_path",
+        type=str,
+        default=None,
+        help="Path to the audio processor. If provided, the processor will be used for Wan2.2-S2V model.",
+    )
+    parser.add_argument(
+        "--max_timestep_boundary",
+        type=float,
+        default=1.0,
+        help="Max timestep boundary (for mixed models, e.g., Wan-AI/Wan2.2-I2V-A14B).",
+    )
+    parser.add_argument(
+        "--min_timestep_boundary",
+        type=float,
+        default=0.0,
+        help="Min timestep boundary (for mixed models, e.g., Wan-AI/Wan2.2-I2V-A14B).",
+    )
+    parser.add_argument(
+        "--initialize_model_on_cpu",
+        default=False,
+        action="store_true",
+        help="Whether to initialize models on CPU.",
+    )
     return parser
 
 
@@ -125,7 +201,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
     accelerator = accelerate.Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
-        kwargs_handlers=[accelerate.DistributedDataParallelKwargs(find_unused_parameters=args.find_unused_parameters)],
+        kwargs_handlers=[
+            accelerate.DistributedDataParallelKwargs(
+                find_unused_parameters=args.find_unused_parameters
+            )
+        ],
     )
     dataset = UnifiedDataset(
         base_path=args.dataset_base_path,
@@ -144,9 +224,16 @@ if __name__ == "__main__":
             time_division_remainder=1,
         ),
         special_operator_map={
-            "animate_face_video": ToAbsolutePath(args.dataset_base_path) >> LoadVideo(args.num_frames, 4, 1, frame_processor=ImageCropAndResize(512, 512, None, 16, 16)),
-            "input_audio": ToAbsolutePath(args.dataset_base_path) >> LoadAudio(sr=16000),
-        }
+            "animate_face_video": ToAbsolutePath(args.dataset_base_path)
+            >> LoadVideo(
+                args.num_frames,
+                4,
+                1,
+                frame_processor=ImageCropAndResize(512, 512, None, 16, 16),
+            ),
+            "input_audio": ToAbsolutePath(args.dataset_base_path)
+            >> LoadAudio(sr=16000),
+        },
     )
     model = WanTrainingModule(
         model_paths=args.model_paths,
